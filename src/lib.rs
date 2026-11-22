@@ -187,6 +187,10 @@ fn hidden(c: char) -> bool {
         || (c as u32) & 0xfffe == 0xfffe
 }
 
+fn prepended(c: char) -> bool {
+    matches!(c, '\u{0600}'..='\u{0605}' | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}' | '\u{08e2}' | '\u{110bd}' | '\u{110cd}')
+}
+
 fn wide_space(c: char) -> bool {
     matches!(c, '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}')
 }
@@ -259,6 +263,10 @@ fn styles(c: char, before: Option<char>, after: Option<char>) -> bool {
 const MAX_STACK: usize = 8;
 const MAX_JOINED: usize = 4;
 
+pub fn printable_lines(text: &str) -> String {
+    text.split('\n').map(printable).collect::<Vec<_>>().join("\n")
+}
+
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let (mut stack, mut chain, mut base, mut joined, mut styled) = (0, 0, None, false, false);
@@ -282,6 +290,10 @@ pub fn printable(text: &str) -> String {
         if !styled && styles(c, base, after) {
             out.push(c);
             styled = true;
+            continue;
+        }
+        if prepended(c) {
+            out.push(c);
             continue;
         }
         let shown = match c {
@@ -413,12 +425,12 @@ impl Catalog {
 
     pub fn try_render(&self, msg: &Msg) -> Result<String, Vec<String>> {
         let mut problems = Vec::new();
-        let text = self.compose(msg, &[], 0, &mut problems);
+        let text = printable_lines(&self.compose(msg, &[], 0, &mut problems));
         if problems.is_empty() { Ok(text) } else { Err(problems) }
     }
 
     pub fn render(&self, msg: &Msg) -> String {
-        self.compose(msg, &[], 0, &mut Vec::new())
+        printable_lines(&self.compose(msg, &[], 0, &mut Vec::new()))
     }
 
     pub fn text(&self, key: &str) -> String {
@@ -456,17 +468,29 @@ pub fn variables(source: &str, key: &str) -> Vec<String> {
     let mut inside = false;
     let mut found = Vec::new();
     for line in source.lines() {
-        let starts_entry = !line.is_empty() && !line.starts_with([' ', '\t', '#', '}']);
+        if line.starts_with('#') {
+            inside = false;
+            continue;
+        }
+        let starts_entry = !line.is_empty() && !line.starts_with([' ', '\t', '}']);
         if starts_entry {
             inside = line.split_once('=').is_some_and(|(k, _)| k.trim() == key);
         }
         if !inside {
             continue;
         }
-        for part in line.split('$').skip(1) {
-            let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-            if !name.is_empty() && !found.contains(&name) {
-                found.push(name);
+        let mut depth = 0usize;
+        for (at, c) in line.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                '$' if depth > 0 => {
+                    let name: String = line[at + 1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+                    if name.starts_with(|first: char| first.is_ascii_alphabetic()) && !found.contains(&name) {
+                        found.push(name);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -792,6 +816,23 @@ mod tests {
         assert_eq!(keys(RU), vec!["touches".to_string(), "hello".to_string()]);
         assert_eq!(variables(RU, "touches"), vec!["count".to_string()]);
         assert_eq!(variables(EN, "hello"), vec!["name".to_string()]);
+        let commented = "a = { $x } costs $5\n# b uses $count\nb = { $count }\n";
+        assert_eq!(variables(commented, "a"), vec!["x".to_string()]);
+        assert_eq!(variables(commented, "b"), vec!["count".to_string()]);
+    }
+
+    #[test]
+    fn what_a_catalog_says_is_sanitised_too_and_caps_hold_across_placeables() {
+        let source = "bell = ring{\"\\u001b\"}]0;x{\"\\u0007\"} the bell\nlines = one\n    two\nmarks = { $a }{ $b }{ $c }\n";
+        let catalog = Catalog::for_languages(&[("en", source)], &["en".into()]);
+        let bell = catalog.render(&Msg::new("bell"));
+        assert!(!bell.contains('\u{1b}') && !bell.contains('\u{7}'), "{bell:?}");
+        assert_eq!(catalog.render(&Msg::new("lines")), "one\ntwo");
+        let accents = "\u{301}".repeat(8);
+        let stacked = catalog.render(&Msg::new("marks").arg("a", &accents).arg("b", &accents).arg("c", &accents));
+        assert!(stacked.chars().filter(|c| *c == '\u{301}').count() <= MAX_STACK, "{}", stacked.chars().count());
+        let hiding = format!("e{}", format!("{accents}\u{70f}").repeat(50));
+        assert!(printable(&hiding).chars().filter(|c| *c == '\u{301}').count() <= MAX_STACK);
     }
 
     #[test]
