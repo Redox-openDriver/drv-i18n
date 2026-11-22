@@ -1,6 +1,6 @@
 [package]
 name = "drv-i18n"
-version = "0.1.0"
+version = "0.1.1"
 description = "Локализация для драйверов: сообщения как ключ + аргументы, каталоги Fluent"
 edition = "2024"
 license = "AGPL-3.0-or-later AND Unicode-3.0"
